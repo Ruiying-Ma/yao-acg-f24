@@ -1,2 +1,6 @@
-images/*
-main
+images
+main*
+smallpt
+include/*
+!include/rtw_stb_image.h
+veach-bidir
