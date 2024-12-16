@@ -158,7 +158,9 @@ struct ImageTexture : Texture {
     }
 };
 
-
+// BSDF framework
+// `sample`: sampling an outward direction for the incident ray
+// `pScatter`: caculate the probability of (r_in, r_out)
 struct Material {
     virtual ~Material() = default;
     virtual double pScatter(const Ray& r_in, const Ray& r_out, const HitRecord& hit_rec) const = 0;
@@ -444,7 +446,7 @@ struct Sphere : Object {
         return 1 / (2 * M_PI * (1 - cos_theta));
     }
 
-    // Importance sampling; sample a direction according to pdf
+    // Importance sampling; sample a point on the shape
     // Return: a sampled `direction`
     // Only for static sphere
     Vec sample(const Vec& src) const override {
@@ -523,7 +525,7 @@ struct Quad : Object {
         return (hit_rec.dist * hit_rec.dist * direction_len * direction_len * direction_len) / (area * std::fabs(direction.dot(hit_rec.n)));
     }
 
-    // Importance sampling; sample a direction according to pdf
+    // Importance sampling; sample a point on the shape
     // Return: a sampled `direction`
     Vec sample(const Vec& src) const override {
         return o + u * random_double() + v * random_double() - src;
@@ -870,6 +872,52 @@ void demo(bool has_point_light) {
 
     int image_width = 400;
     int image_height = 400;
+    int sample_len = 40;
+    Vec background = Vec();
+
+    double vfov     = 40;
+    Vec lookfrom = Vec(60, 10, 20);
+    Vec lookat   = Vec(0, 10, 0);
+    Vec vup      = Vec(0, 1, 0);
+    double focus = 10;
+
+
+    render(
+        f,
+        lights, 
+        world,
+        image_height,
+        image_width,
+        sample_len,
+        lookfrom, // camera position
+        lookat, // camera target
+        vup, // up direction for camera
+        vfov, // camera vfov
+        focus, // focus of the camera
+        background
+    );
+}
+
+void demo_hdr() {
+    FILE *f;
+    f = fopen("images/demo_hdr1.ppm", "w");
+
+    std::vector<std::shared_ptr<Object>> world;
+    std::vector<std::shared_ptr<Object>> lights;
+
+    auto red   = std::make_shared<SpecularMaterial>(Vec(0.85, 0.85, 0.85));
+    auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
+    auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
+    // auto light = std::make_shared<AreaLight>("texture/forest.jpg");
+    auto light = std::make_shared<AreaLight>(Vec(.12, .45, .15));
+    auto empty_material = std::shared_ptr<Material>();
+    
+    world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 10, red));
+    // world.push_back(std::make_shared<Sphere>(Vec(0, -1e4, 0), 1e4, green));
+    world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 1e4, light));
+
+    int image_width = 400;
+    int image_height = 400;
     int sample_len = 10;
     Vec background = Vec();
 
@@ -971,9 +1019,10 @@ void bouncing_spheres() {
     );
 }
 
-void cornell_box() {
+void cornell_box(bool has_point_light) {
     FILE *f;
-    f = fopen("images/cornell_box1.ppm", "w");
+    if (has_point_light) {f = fopen("images/cornell_box1_is.ppm", "w");} 
+    else {f = fopen("images/cornell_box1_nois.ppm", "w");}
 
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
@@ -987,6 +1036,9 @@ void cornell_box() {
     world.push_back(std::make_shared<Quad>(Vec(555,0,0), Vec(0,555,0), Vec(0,0,555), green));
     world.push_back(std::make_shared<Quad>(Vec(0,0,0), Vec(0,555,0), Vec(0,0,555), red));
     world.push_back(std::make_shared<Quad>(Vec(343, 554, 332), Vec(-130,0,0), Vec(0,0,-105), light));
+    if (has_point_light) {
+        lights.push_back(std::make_shared<Quad>(Vec(343, 554, 332), Vec(-130,0,0), Vec(0,0,-105), empty_material));
+    }
     world.push_back(std::make_shared<Quad>(Vec(0,0,0), Vec(555,0,0), Vec(0,0,555), white));
     world.push_back(std::make_shared<Quad>(Vec(555,555,555), Vec(-555,0,0), Vec(0,0,-555), white));
     world.push_back(std::make_shared<Quad>(Vec(0,0,555), Vec(555,0,0), Vec(0,555,0), white));
@@ -998,7 +1050,7 @@ void cornell_box() {
 
     int image_width = 400;
     int image_height = 400;
-    int sample_len = 40;
+    int sample_len = 10;
     Vec background = Vec();
 
     double vfov     = 40;
@@ -1123,7 +1175,8 @@ void custom() {
 
 int main() {
     // bouncing_spheres();
-    demo(false);
+    // demo(true);
+    demo_hdr();
     // custom();
-    // cornell_box();
+    // cornell_box(false);
 }
