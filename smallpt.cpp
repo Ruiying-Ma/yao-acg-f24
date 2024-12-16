@@ -257,8 +257,26 @@ struct AreaLight : Material {
     AreaLight(const char* img_path): tex(std::make_shared<ImageTexture>(img_path)) {}
     double pScatter(const Ray& r_in, const Ray& r_out, const HitRecord& hit_rec) const override {assert(false); return 0.0;}
     Vec emit(const HitRecord& hit_rec) const override {
-        if (!hit_rec.front_face)
+        if (!hit_rec.front_face){return Vec();}
+        return tex->at(hit_rec.u, hit_rec.v, hit_rec.ip);
+    }
+    Vec attenuation(const HitRecord& hit_rec) const override {assert(false);return Vec(1.0, 1.0, 1.0);}  
+    Vec sample(const Ray& r_in, const HitRecord& hit_rec) const override {return Vec();} 
+    double prob(const HitRecord& hit_rec, const Vec& direction) const override {return 0.0;}
+    double sample_thresh() const override {return 0.0;}
+};
+
+struct HDRLight : Material {
+    std::shared_ptr<Texture> tex;
+    HDRLight(const Vec& c_): tex(std::make_shared<ColorTexture>(c_)) {}
+    HDRLight(const char* img_path): tex(std::make_shared<ImageTexture>(img_path)) {}
+    double pScatter(const Ray& r_in, const Ray& r_out, const HitRecord& hit_rec) const override {assert(false); return 0.0;}
+    Vec emit(const HitRecord& hit_rec) const override {
+        if (hit_rec.front_face){
+            std::cerr<<"HDRLight cannot have front_face=True\n";
+            exit(1);
             return Vec();
+        }
         return tex->at(hit_rec.u, hit_rec.v, hit_rec.ip);
     }
     Vec attenuation(const HitRecord& hit_rec) const override {assert(false);return Vec(1.0, 1.0, 1.0);}  
@@ -751,6 +769,13 @@ Vec radiance(
     // Sample the scattered ray
     Ray r_out;
     double sampled_prob = sample(r_in, hit_rec, point_lights, r_out);
+    /////////////////////////////////////////
+    // if (sampled_prob == 0) {
+    //     std::clog<<"emit "; 
+    //     hit_rec.mat->emit(hit_rec).print(); 
+    //     std::clog<<std::endl;
+    // }
+    //////////////////////////////////////////
     if (sampled_prob == 0) {return hit_rec.mat->emit(hit_rec);}
     // Calculate pScatter, attenuation, emit
     double scattered_prob = hit_rec.mat->pScatter(r_in, r_out, hit_rec);
@@ -905,11 +930,11 @@ void demo_hdr() {
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
 
-    auto red   = std::make_shared<SpecularMaterial>(Vec(0.85, 0.85, 0.85));
+    auto red   = std::make_shared<SpecularMaterial>(Vec(0.85, 0.85, 0.85), 0.0);
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
     auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
     // auto light = std::make_shared<AreaLight>("texture/forest.jpg");
-    auto light = std::make_shared<AreaLight>(Vec(.12, .45, .15));
+    auto light = std::make_shared<HDRLight>("texture/skysphere.jpg");
     auto empty_material = std::shared_ptr<Material>();
     
     world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 10, red));
@@ -922,7 +947,7 @@ void demo_hdr() {
     Vec background = Vec();
 
     double vfov     = 40;
-    Vec lookfrom = Vec(60, 10, 20);
+    Vec lookfrom = Vec(0, 10, 60);
     Vec lookat   = Vec(0, 10, 0);
     Vec vup      = Vec(0, 1, 0);
     double focus = 10;
