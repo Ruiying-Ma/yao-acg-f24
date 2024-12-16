@@ -11,8 +11,9 @@
 #include <algorithm>
 
 
-const double INF = std::numeric_limits<double>::infinity();
-const int ray_tracing_depth = 10;
+const double INF = std::numeric_limits<double>::infinity(); // for double
+const int ray_tracing_depth = 1e5; // set this to be large, meaning that we are using roussian roulette for optimization
+const double rl_init = 0.95; // the initial roussian roulette weight
 
 inline double degrees_to_radians(double degrees) {
     return degrees * M_PI / 180.0;
@@ -633,19 +634,23 @@ int intersect(const std::vector<std::shared_ptr<Object>>& objects, const std::sh
     return r_intersect != -1 ? r_intersect : l_intersect;
 }
 
+// Roussian Roulette
 Vec radiance(
     const std::vector<std::shared_ptr<Object>>& point_lights,
     const std::vector<std::shared_ptr<Object>>& objects, 
     const std::shared_ptr<BVHNode> &bvh_root, 
     const Ray &r_in,
     int depth,
-    Vec background
+    Vec background, 
+    double rl_weight
 ) {
     if (depth <= 0) {return Vec();}
     HitRecord hit_rec;
     int obj_idx = intersect(objects, bvh_root, r_in, hit_rec, 1e-3, INF);
     if (obj_idx == -1) {return background;}
     // std::clog<<"intersect with "<<obj_idx<<std::endl;///////////////////////////////////////
+    // Roussian roulette
+    if (random_double() > rl_weight) {return Vec();}
     // Sample the scattered ray
     Ray r_out;
     double sampled_prob = sample(r_in, hit_rec, point_lights, r_out);
@@ -654,17 +659,30 @@ Vec radiance(
     double scattered_prob = hit_rec.mat->pScatter(r_in, r_out, hit_rec);
     Vec attenuation = hit_rec.mat->attenuation(hit_rec);
     Vec emit = hit_rec.mat->emit(hit_rec);
+    // Reduce rl_weigth by attenutation
+    double new_rl_weight = attenuation.x > attenuation.y && attenuation.x > attenuation.z ? attenuation.x : attenuation.y > attenuation.z ? attenuation.y : attenuation.z;
+    new_rl_weight = std::fmax(new_rl_weight, 0.95);
+    new_rl_weight *= rl_weight;
+    new_rl_weight = std::fmin(new_rl_weight, rl_init);
     // Recursion
-    Vec post_color = radiance(point_lights, objects, bvh_root, r_out, depth - 1, background);
+    Vec post_color = radiance(point_lights, objects, bvh_root, r_out, depth - 1, background, new_rl_weight);
     // Calculate the final color
-    return emit + attenuation.mult(post_color) * scattered_prob / sampled_prob;
+    return (emit + attenuation.mult(post_color) * scattered_prob / sampled_prob) / rl_weight;
 }
 
 // Write a pixel color to a line of a file: "r g b\n"
 Vec get_color(const Vec& pixel_color) {
-    double r = linear_to_gamma(pixel_color.x);
-    double g = linear_to_gamma(pixel_color.y);
-    double b = linear_to_gamma(pixel_color.z);
+    auto r = pixel_color.x;
+    auto g = pixel_color.y;
+    auto b = pixel_color.z;
+    // Replace NaN components with zero.
+    // Copied from the textbook. This is to remove black acnes.
+    if (r != r) r = 0.0;
+    if (g != g) g = 0.0;
+    if (b != b) b = 0.0;
+    double r = linear_to_gamma(r);
+    double g = linear_to_gamma(g);
+    double b = linear_to_gamma(b);
     double min = 0;
     double max = 0.999;
     int rbyte = int(256 * clamp(r, min, max));
@@ -719,7 +737,7 @@ void render(
                     Ray sampled_ray(lookfrom, pixel_loc - lookfrom, random_double());
                     // Raytracing with BVH
                     Ray r_in = sampled_ray;
-                    pixel_color = pixel_color + radiance(point_lights, objects, bvh_root, r_in, ray_tracing_depth, background_color);
+                    pixel_color = pixel_color + radiance(point_lights, objects, bvh_root, r_in, ray_tracing_depth, background_color, rl_init);
                 }
             }
             image[j * image_width + i] = get_color(pixel_color / double(sample_len * sample_len));
