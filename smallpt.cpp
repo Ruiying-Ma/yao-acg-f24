@@ -14,6 +14,9 @@
 const double INF = std::numeric_limits<double>::infinity(); // for double
 const int ray_tracing_depth = 1e5; // set this to be large, meaning that we are using roussian roulette for optimization
 const double rl_init = 0.95; // the initial roussian roulette weight
+const double cost_trav = 0.125; // the cost of traversal of SAH
+const double cost_isect = 1.0; // the cost of ray intersecting an object in SAH
+const int n_bucket = 12; // the number of buckets in SAH
 
 inline double degrees_to_radians(double degrees) {
     return degrees * M_PI / 180.0;
@@ -327,6 +330,28 @@ struct BBox {
         return (range_x > range_y && range_x > range_z) ? 0 : (range_y > range_z ? 1 : 2);
     }
 
+    // For SAH
+    double surface_area() const {
+        double area = std::fmax(x1 - x0, 0) * std::fmax(y1 - y0, 0) + std::fmax(x1 - x0, 0) * std::fmax(z1 - z0, 0) + std::fmax(y1 - y0, 0) * std::fmax(z1 - z0, 0);
+        assert(area >= 0);
+        return 2.0 * area;
+    }
+    // For SAH
+    double centroid(int axis) const {
+        switch (axis)
+        {
+        case 0:
+            return (x1 + x0) / 2.0;
+        case 1:
+            return (y1 + y0) / 2.0;
+        case 2:
+            return (z1 + z0) / 2.0;
+        default:
+            std::cerr << "Unknown axis " << axis << std::endl;
+            exit(1);
+        }
+    }
+
     void print() const {
         std::clog<<"["<<x0<<", "<<x1<<"] x ";
         std::clog<<"["<<y0<<", "<<y1<<"] x ";
@@ -361,11 +386,11 @@ struct Sphere : Object {
         Vec radius_v = Vec(rad, rad, rad);
         bbox = BBox(static_center - radius_v, static_center + radius_v);
         /////////////////////////
-        std::clog<<"Create a sphere at ";
-        static_center.print();
-        std::clog<<"\n\tbbox: ";
-        bbox.print();
-        std::clog<<"\n";
+        // std::clog<<"Create a sphere at ";
+        // static_center.print();
+        // std::clog<<"\n\tbbox: ";
+        // bbox.print();
+        // std::clog<<"\n";
         ////////////////////////////
     }
 
@@ -455,13 +480,13 @@ struct Quad : Object {
         dot_o_n_u = n_u.dot(o);
         bbox = BBox(BBox(o, o+u+v), BBox(o+u, o+v));
         /////////////////////////
-        std::clog<<"Create a quad at ";
-        o.print();
-        u.print();
-        v.print();
-        std::clog<<"\n\tbbox: ";
-        bbox.print();
-        std::clog<<"\n";
+        // std::clog<<"Create a quad at ";
+        // o.print();
+        // u.print();
+        // v.print();
+        // std::clog<<"\n\tbbox: ";
+        // bbox.print();
+        // std::clog<<"\n";
         ////////////////////////////
     }
 
@@ -511,9 +536,9 @@ struct Quad : Object {
 void create_box(std::vector<std::shared_ptr<Object>>& objects, const Vec& a, double x, double y, double z, const std::shared_ptr<Material> material) {
     Vec b = a + Vec(std::fabs(x), std::fabs(y), std::fabs(z));
     ////////////////
-    a.print();
-    std::clog<<"\n";
-    b.print();
+    // a.print();
+    // std::clog<<"\n";
+    // b.print();
     //////////////////
     Vec min = Vec(std::fmin(a.x,b.x), std::fmin(a.y,b.y), std::fmin(a.z,b.z));
     Vec max = Vec(std::fmax(a.x,b.x), std::fmax(a.y,b.y), std::fmax(a.z,b.z));
@@ -530,6 +555,15 @@ void create_box(std::vector<std::shared_ptr<Object>>& objects, const Vec& a, dou
     objects.push_back(std::make_shared<Quad>(Vec(min.x, min.y, min.z),  dx,  dz, material)); // bottom  
 }
 
+struct BucketInfo {
+    int n_objects;
+    BBox bbox;
+    int obj_idx;
+
+    BucketInfo(): n_objects(0), bbox(BBox()), obj_idx(-1) {}
+};
+
+// BVH with SAH (surface area heuristic)
 struct BVHNode {
     int start, end; // idx range of covered objects
     std::shared_ptr<BVHNode> left;
@@ -552,9 +586,9 @@ struct BVHNode {
             return;
         }
         /////////////////////////////
-        std::clog<<"Create BBox for bvh node:\n\t";/////////////////////////////
-        bbox.print();//////////////////////////////////////////////////////
-        std::clog<<"\n";
+        // std::clog<<"Create BBox for bvh node:\n\t";/////////////////////////////
+        // bbox.print();//////////////////////////////////////////////////////
+        // std::clog<<"\n";
         //////////////////////////////////
         assert(end_idx - start_idx >= 2);
         int max_axis = bbox.longest_axis();
@@ -573,14 +607,75 @@ struct BVHNode {
             std::cerr << "Unknown axis " << max_axis << std::endl;
             exit(1);
         }
-        int mid = start_idx + (end_idx - start_idx) / 2;
+        // SAH: how to choose `mid`
+        int mid = start_idx + (end_idx - start_idx) / 2; // default: end_idx - start_idx <= 4
+        if (end_idx - start_idx > 4) {
+            // Create buckets
+            std::vector<BucketInfo> buckets(n_bucket);
+            double left_margin = objects[start_idx]->get_bbox().centroid(max_axis);
+            double right_margin = objects[end_idx - 1]->get_bbox().centroid(max_axis);
+            double bucket_size = (right_margin - left_margin) / n_bucket;
+            assert(bucket_size > 0);
+            //Initialize the buckets: O(n)
+            for (int idx = start_idx; idx < end_idx; idx++) {
+                double centroid = objects[idx]->get_bbox().centroid(max_axis);
+                // Predict the bucket idx
+                int bucket_idx = int((centroid - left_margin) / bucket_size);
+                assert(bucket_idx >= 0);
+                if (bucket_idx == n_bucket) {bucket_idx = n_bucket - 1;}
+                assert(bucket_idx < n_bucket);
+                // Update the bucket
+                buckets[bucket_idx].n_objects += 1;
+                buckets[bucket_idx].bbox = BBox(buckets[bucket_idx].bbox, objects[idx]->get_bbox());
+                buckets[bucket_idx].obj_idx = idx;
+            }
+            // For debugging
+            for (int bid = 0; bid < n_bucket - 1; bid++) {
+                assert(buckets[bid + 1].obj_idx == -1 || buckets[bid].obj_idx == -1 || buckets[bid].obj_idx < buckets[bid + 1].obj_idx);
+            }
+            // Find the best `mid`: O(n)
+            double tot_area = bbox.surface_area();
+            assert(tot_area > 0);
+            double min_cost = INF;
+            double opt_mid = -1; // #left
+            for (int cur_mid = 1; cur_mid < n_bucket; cur_mid++) {
+                BBox left_bbox = BBox();
+                int left_n_objects = 0;
+                int left_mid = -1;
+                BBox right_bbox = BBox();
+                int right_n_objects = 0;
+                for (int lidx = 0; lidx < cur_mid; lidx++) {
+                    left_bbox = BBox(left_bbox, buckets[lidx].bbox);
+                    left_n_objects += buckets[lidx].n_objects;
+                    if (buckets[lidx].obj_idx != -1) {
+                        assert(buckets[lidx].obj_idx > left_mid);
+                        left_mid = buckets[lidx].obj_idx;
+                    }
+                }
+                if(left_mid == -1) {assert(left_n_objects==0); continue;}
+                for (int ridx = cur_mid; ridx < n_bucket; ridx++) {
+                    right_bbox = BBox(right_bbox, buckets[ridx].bbox);
+                    right_n_objects += buckets[ridx].n_objects;
+                }
+                if(right_n_objects == 0) {continue;}
+                assert(left_n_objects + right_n_objects == end_idx - start_idx);
+                double cur_cost = cost_trav + cost_isect * (left_n_objects * left_bbox.surface_area() + right_n_objects * right_bbox.surface_area()) / tot_area;
+                if (cur_cost < min_cost) {
+                    min_cost = cur_cost;
+                    opt_mid = left_mid;
+                }
+            }
+            assert(min_cost < INF);
+            assert(opt_mid >= start_idx and opt_mid <= end_idx - 2);
+            mid = opt_mid + 1;
+        }
         left = std::make_shared<BVHNode>(objects, start_idx, mid);
         right = std::make_shared<BVHNode>(objects, mid, end_idx);
     }
-
-    static bool box_x_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().x0 < b->get_bbox().x0;}
-    static bool box_y_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().y0 < b->get_bbox().y0;}
-    static bool box_z_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().z0 < b->get_bbox().z0;}
+    // Sort according to centroid, due to SAH
+    static bool box_x_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().centroid(0) < b->get_bbox().centroid(0);}
+    static bool box_y_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().centroid(1) < b->get_bbox().centroid(1);}
+    static bool box_z_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().centroid(2) < b->get_bbox().centroid(2);}
 };
 
 // Importance sampling
@@ -672,17 +767,17 @@ Vec radiance(
 
 // Write a pixel color to a line of a file: "r g b\n"
 Vec get_color(const Vec& pixel_color) {
-    auto r = pixel_color.x;
-    auto g = pixel_color.y;
-    auto b = pixel_color.z;
+    double r = pixel_color.x;
+    double g = pixel_color.y;
+    double b = pixel_color.z;
     // Replace NaN components with zero.
     // Copied from the textbook. This is to remove black acnes.
     if (r != r) r = 0.0;
     if (g != g) g = 0.0;
     if (b != b) b = 0.0;
-    double r = linear_to_gamma(r);
-    double g = linear_to_gamma(g);
-    double b = linear_to_gamma(b);
+    r = linear_to_gamma(r);
+    g = linear_to_gamma(g);
+    b = linear_to_gamma(b);
     double min = 0;
     double max = 0.999;
     int rbyte = int(256 * clamp(r, min, max));
@@ -760,7 +855,7 @@ void demo(bool has_point_light) {
     std::vector<std::shared_ptr<Object>> lights;
 
     // auto red   = std::make_shared<SpecularMaterial>(Vec(.65, .05, .05));
-    auto red   = std::make_shared<TransmissiveMaterial>(1.5);
+    auto red   = std::make_shared<TransmissiveMaterial>(0.5);
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
     auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
     auto light = std::make_shared<AreaLight>(Vec(15, 15, 15));
@@ -1027,8 +1122,8 @@ void custom() {
 }
 
 int main() {
-    bouncing_spheres();
-    // demo(false);
+    // bouncing_spheres();
+    demo(false);
     // custom();
     // cornell_box();
 }
