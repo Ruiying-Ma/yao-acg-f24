@@ -12,8 +12,8 @@
 
 
 const double INF = std::numeric_limits<double>::infinity(); // for double
-const int ray_tracing_depth = 1e5; // set this to be large, meaning that we are using roussian roulette for optimization
-const double rl_init = 0.95; // the initial roussian roulette weight
+const int ray_tracing_depth = 5;
+const double rl_init = 0.98; // the initial roussian roulette weight
 const double cost_trav = 0.125; // the cost of traversal of SAH
 const double cost_isect = 1.0; // the cost of ray intersecting an object in SAH
 const int n_bucket = 12; // the number of buckets in SAH
@@ -636,63 +636,69 @@ struct BVHNode {
         int mid = start_idx + (end_idx - start_idx) / 2; // default: end_idx - start_idx <= 4
         if (end_idx - start_idx > 4) {
             // Create buckets
-            std::vector<BucketInfo> buckets(n_bucket);
             double left_margin = objects[start_idx]->get_bbox().centroid(max_axis);
             double right_margin = objects[end_idx - 1]->get_bbox().centroid(max_axis);
             double bucket_size = (right_margin - left_margin) / n_bucket;
-            assert(bucket_size > 0);
-            //Initialize the buckets: O(n)
-            for (int idx = start_idx; idx < end_idx; idx++) {
-                double centroid = objects[idx]->get_bbox().centroid(max_axis);
-                // Predict the bucket idx
-                int bucket_idx = int((centroid - left_margin) / bucket_size);
-                assert(bucket_idx >= 0);
-                if (bucket_idx == n_bucket) {bucket_idx = n_bucket - 1;}
-                assert(bucket_idx < n_bucket);
-                // Update the bucket
-                buckets[bucket_idx].n_objects += 1;
-                buckets[bucket_idx].bbox = BBox(buckets[bucket_idx].bbox, objects[idx]->get_bbox());
-                buckets[bucket_idx].obj_idx = idx;
+            if (bucket_size <= 0) {
+                // all aligned
+                mid = start_idx + (end_idx - start_idx) / 2;
             }
-            // For debugging
-            for (int bid = 0; bid < n_bucket - 1; bid++) {
-                assert(buckets[bid + 1].obj_idx == -1 || buckets[bid].obj_idx == -1 || buckets[bid].obj_idx < buckets[bid + 1].obj_idx);
-            }
-            // Find the best `mid`: O(n)
-            double tot_area = bbox.surface_area();
-            assert(tot_area > 0);
-            double min_cost = INF;
-            double opt_mid = -1; // #left
-            for (int cur_mid = 1; cur_mid < n_bucket; cur_mid++) {
-                BBox left_bbox = BBox();
-                int left_n_objects = 0;
-                int left_mid = -1;
-                BBox right_bbox = BBox();
-                int right_n_objects = 0;
-                for (int lidx = 0; lidx < cur_mid; lidx++) {
-                    left_bbox = BBox(left_bbox, buckets[lidx].bbox);
-                    left_n_objects += buckets[lidx].n_objects;
-                    if (buckets[lidx].obj_idx != -1) {
-                        assert(buckets[lidx].obj_idx > left_mid);
-                        left_mid = buckets[lidx].obj_idx;
+            else {
+                assert(bucket_size > 0);
+                //Initialize the buckets: O(n)
+                std::vector<BucketInfo> buckets(n_bucket);
+                for (int idx = start_idx; idx < end_idx; idx++) {
+                    double centroid = objects[idx]->get_bbox().centroid(max_axis);
+                    // Predict the bucket idx
+                    int bucket_idx = int((centroid - left_margin) / bucket_size);
+                    assert(bucket_idx >= 0);
+                    if (bucket_idx == n_bucket) {bucket_idx = n_bucket - 1;}
+                    assert(bucket_idx < n_bucket);
+                    // Update the bucket
+                    buckets[bucket_idx].n_objects += 1;
+                    buckets[bucket_idx].bbox = BBox(buckets[bucket_idx].bbox, objects[idx]->get_bbox());
+                    buckets[bucket_idx].obj_idx = idx;
+                }
+                // For debugging
+                for (int bid = 0; bid < n_bucket - 1; bid++) {
+                    assert(buckets[bid + 1].obj_idx == -1 || buckets[bid].obj_idx == -1 || buckets[bid].obj_idx < buckets[bid + 1].obj_idx);
+                }
+                // Find the best `mid`: O(n)
+                double tot_area = bbox.surface_area();
+                assert(tot_area > 0);
+                double min_cost = INF;
+                double opt_mid = -1; // #left
+                for (int cur_mid = 1; cur_mid < n_bucket; cur_mid++) {
+                    BBox left_bbox = BBox();
+                    int left_n_objects = 0;
+                    int left_mid = -1;
+                    BBox right_bbox = BBox();
+                    int right_n_objects = 0;
+                    for (int lidx = 0; lidx < cur_mid; lidx++) {
+                        left_bbox = BBox(left_bbox, buckets[lidx].bbox);
+                        left_n_objects += buckets[lidx].n_objects;
+                        if (buckets[lidx].obj_idx != -1) {
+                            assert(buckets[lidx].obj_idx > left_mid);
+                            left_mid = buckets[lidx].obj_idx;
+                        }
+                    }
+                    if(left_mid == -1) {assert(left_n_objects==0); continue;}
+                    for (int ridx = cur_mid; ridx < n_bucket; ridx++) {
+                        right_bbox = BBox(right_bbox, buckets[ridx].bbox);
+                        right_n_objects += buckets[ridx].n_objects;
+                    }
+                    if(right_n_objects == 0) {continue;}
+                    assert(left_n_objects + right_n_objects == end_idx - start_idx);
+                    double cur_cost = cost_trav + cost_isect * (left_n_objects * left_bbox.surface_area() + right_n_objects * right_bbox.surface_area()) / tot_area;
+                    if (cur_cost < min_cost) {
+                        min_cost = cur_cost;
+                        opt_mid = left_mid;
                     }
                 }
-                if(left_mid == -1) {assert(left_n_objects==0); continue;}
-                for (int ridx = cur_mid; ridx < n_bucket; ridx++) {
-                    right_bbox = BBox(right_bbox, buckets[ridx].bbox);
-                    right_n_objects += buckets[ridx].n_objects;
-                }
-                if(right_n_objects == 0) {continue;}
-                assert(left_n_objects + right_n_objects == end_idx - start_idx);
-                double cur_cost = cost_trav + cost_isect * (left_n_objects * left_bbox.surface_area() + right_n_objects * right_bbox.surface_area()) / tot_area;
-                if (cur_cost < min_cost) {
-                    min_cost = cur_cost;
-                    opt_mid = left_mid;
-                }
+                assert(min_cost < INF);
+                assert(opt_mid >= start_idx and opt_mid <= end_idx - 2);
+                mid = opt_mid + 1;
             }
-            assert(min_cost < INF);
-            assert(opt_mid >= start_idx and opt_mid <= end_idx - 2);
-            mid = opt_mid + 1;
         }
         left = std::make_shared<BVHNode>(objects, start_idx, mid);
         right = std::make_shared<BVHNode>(objects, mid, end_idx);
@@ -703,39 +709,71 @@ struct BVHNode {
     static bool box_z_compare (const std::shared_ptr<Object> a, const std::shared_ptr<Object> b) {return a->get_bbox().centroid(2) < b->get_bbox().centroid(2);}
 };
 
-// Importance sampling
-// Return the probability of the sampled ray
+// Multiple importance sampling
+// Return the MIS weight: $\frac{ N (n_i p_i) ^ {b - 1} }{ \sum_k n_kp_k }$
 // Store the sampled ray to `r_out`
-double sample(const Ray& r_in, const HitRecord& hit_rec, const std::vector<std::shared_ptr<Object>>& point_lights, Ray& r_out) {
+double sample(
+    const Ray& r_in, 
+    const HitRecord& hit_rec, 
+    const std::vector<std::shared_ptr<Object>>& point_lights, 
+    Ray& r_out,
+    int obj_idx,
+    int n_samples,
+    const std::vector<int>& mis_samples
+) {
     // Sample a scattering direction
     r_out.o = hit_rec.ip;
     r_out.t = r_in.t;
     double thresh = hit_rec.mat->sample_thresh();
     if (point_lights.size() == 0) {
-        thresh = 0;
+        thresh = 0.0;
     }
-    if (random_double() < thresh) {
-        // sample using lights based on their shapes: randomly choose a light
-        int pl_idx = random_int(0, point_lights.size() - 1);
-        r_out.d = point_lights[pl_idx]->sample(hit_rec.ip); // src = intersection
-    }
-    else {
-        // sample using the material of the hit object
+    // if (random_double() < thresh) {
+    //     // sample using lights based on their shapes: randomly choose a light
+    //     int pl_idx = random_int(0, point_lights.size() - 1);
+    //     r_out.d = point_lights[pl_idx]->sample(hit_rec.ip); // src = intersection
+    // }
+    // else {
+    //     // sample using the material of the hit object
+    //     r_out.d = hit_rec.mat->sample(r_in, hit_rec);
+    // }
+    // // Calculate the sampling probability
+    // double pl_prob = 0.0;
+    // if (thresh > 0) {
+    //     for (const auto& pl : point_lights) {
+    //         pl_prob += pl->prob(hit_rec.ip, r_out.d); // origin = intersection, direction = out_dir
+    //     }
+    //     pl_prob /= point_lights.size();
+    // }
+    // double mat_prob = 0.0;
+    // if (1 - thresh > 0) {
+    //     mat_prob = hit_rec.mat->prob(hit_rec, r_out.d);
+    // }
+    // return thresh * pl_prob + (1 - thresh) * mat_prob;
+
+    // Calculate the MIS weight
+    double mis_prob;
+    if (obj_idx > 0 && thresh > 0.0) {
+        // sample a light
+        r_out.d = point_lights[obj_idx - 1]->sample(hit_rec.ip); 
+        mis_prob = point_lights[obj_idx - 1]->prob(hit_rec.ip, r_out.d);
+    } else {
+        // sample the object
         r_out.d = hit_rec.mat->sample(r_in, hit_rec);
-    }
-    // Calculate the sampling probability
-    double pl_prob = 0.0;
-    if (thresh > 0) {
-        for (const auto& pl : point_lights) {
-            pl_prob += pl->prob(hit_rec.ip, r_out.d); // origin = intersection, direction = out_dir
+        mis_prob = hit_rec.mat->prob(hit_rec, r_out.d);
+        if (thresh == 0.0) {
+            return mis_prob == 0.0 ? 0.0 : 1 / mis_prob;
         }
-        pl_prob /= point_lights.size();
+        assert(obj_idx == 0);
     }
-    double mat_prob = 0.0;
-    if (1 - thresh > 0) {
-        mat_prob = hit_rec.mat->prob(hit_rec, r_out.d);
-    }
-    return thresh * pl_prob + (1 - thresh) * mat_prob;
+    if (mis_prob == 0.0) {return 0.0;} // emit
+    double mw_n = double(n_samples) * std::pow(mis_samples[obj_idx] * mis_prob, mis_beta - 1);
+    double mw_d = std::pow(mis_samples[0] * hit_rec.mat->prob(hit_rec, r_out.d), mis_beta); // the object
+    for (int mw_d_idx=1; mw_d_idx < mis_samples.size(); mw_d_idx++) { // the lights
+        mw_d += std::pow(mis_samples[mw_d_idx] * point_lights[mw_d_idx - 1]->prob(hit_rec.ip, r_out.d), mis_beta);
+    } 
+    assert(mw_n > 0 && mw_d > 0);
+    return mw_n / mw_d;
 }
 
 // BVH optimization
@@ -762,18 +800,20 @@ Vec radiance(
     const Ray &r_in,
     int depth,
     Vec background, 
-    double rl_weight
+    double rl_weight,
+    int mis_obj_idx,
+    int n_samples,
+    const std::vector<int>& mis_samples
 ) {
-    if (depth <= 0) {return Vec();}
+    // Roussian roulette
+    if (depth <= 0 && random_double() > rl_weight) {return Vec();} // at least `ray_tracing_depth` bounces!// if (depth <= 0) {return Vec();}
     HitRecord hit_rec;
     int obj_idx = intersect(objects, bvh_root, r_in, hit_rec, 1e-3, INF);
     if (obj_idx == -1) {return background;}
-    // Roussian roulette
-    if (random_double() > rl_weight) {return Vec();}
     // Sample the scattered ray
     Ray r_out;
-    double sampled_prob = sample(r_in, hit_rec, point_lights, r_out);
-    if (sampled_prob == 0) {return hit_rec.mat->emit(hit_rec);}
+    double mis_weight = sample(r_in, hit_rec, point_lights, r_out, mis_obj_idx, n_samples, mis_samples);
+    if (mis_weight == 0) {return hit_rec.mat->emit(hit_rec);}
     // Calculate pScatter, attenuation, emit
     double scattered_prob = hit_rec.mat->pScatter(r_in, r_out, hit_rec);
     Vec attenuation = hit_rec.mat->attenuation(hit_rec);
@@ -784,9 +824,10 @@ Vec radiance(
     new_rl_weight *= rl_weight;
     new_rl_weight = std::fmin(new_rl_weight, rl_init);
     // Recursion
-    Vec post_color = radiance(point_lights, objects, bvh_root, r_out, depth - 1, background, new_rl_weight);
+    Vec post_color = radiance(point_lights, objects, bvh_root, r_out, depth - 1, background, new_rl_weight, mis_obj_idx, n_samples, mis_samples);
     // Calculate the final color
-    return (emit + attenuation.mult(post_color) * scattered_prob / sampled_prob) / rl_weight;
+    // return (emit + attenuation.mult(post_color) * scattered_prob / sampled_prob) / rl_weight;
+    return (emit + attenuation.mult(post_color) * scattered_prob * mis_weight) / rl_weight;
 }
 
 // Write a pixel color to a line of a file: "r g b\n"
@@ -808,6 +849,29 @@ Vec get_color(const Vec& pixel_color) {
     int gbyte = int(256 * clamp(g, min, max));
     int bbyte = int(256 * clamp(b, min, max));
     return Vec(rbyte, gbyte, bbyte);
+}
+
+// Set the number of samples for each PDF
+void MIS_init(std::vector<int>& mis_samples, int n_samples) {
+    if (mis_samples.size() == 1) {mis_samples[0] = n_samples; return;} // there is no light
+    mis_samples[0] = n_samples / 1.05;
+    // mis_samples[0] = 0;
+    int n_remain_samples = n_samples - mis_samples[0];
+    int quotient = n_remain_samples / (mis_samples.size() - 1);
+    int remainder = n_remain_samples % (mis_samples.size() - 1);
+    for(int i=1; i < mis_samples.size(); i++) {
+        mis_samples[i] = quotient;
+        if (i <= remainder) {
+            mis_samples[i] += 1;
+        }
+    }
+    // DEBUG
+    int tot_samples = 0;
+    for (auto& ms : mis_samples) {
+        tot_samples += ms;
+    }
+    assert(tot_samples == n_samples);
+
 }
 
 void render(
@@ -840,13 +904,20 @@ void render(
     std::shared_ptr<BVHNode> bvh_root = std::make_shared<BVHNode>(objects, 0, objects.size());
     // Raytracing
     std::vector<Vec> image(image_height * image_width);
+    // Multiple importance sampling
+    std::vector<int> mis_samples(1 + point_lights.size());
+    MIS_init(mis_samples, sample_len * sample_len);
+    std::clog<<mis_samples[0]<<"\n";////////////////////////////////////
     for(int j = 0; j < image_height; j++) {
         std::clog << "\rScanlines remaining: " << (image_height - j) << ' ' << std::flush;
         for(int i = 0; i < image_width; i++) {
             Vec pixel_color;
             // Anti-aliasing by sampling rays for each pixel
-            for(int s_j = 0; s_j < sample_len; s_j++) {
-                for(int s_i = 0; s_i < sample_len; s_i++) {
+            int tot_sample_id = 0;
+            for(int mis_obj_idx=0; mis_obj_idx < mis_samples.size(); mis_obj_idx++) {
+                for(int cur_sid=0; cur_sid < mis_samples[mis_obj_idx]; cur_sid++) {
+                    int s_j = tot_sample_id / sample_len;
+                    int s_i = tot_sample_id % sample_len;
                     // Sample a ray: stratified
                     double pixel_i = (s_i + random_double()) / sample_len - 0.5;
                     double pixel_j = (s_j + random_double()) / sample_len - 0.5;
@@ -856,7 +927,8 @@ void render(
                     Ray sampled_ray(lookfrom, pixel_loc - lookfrom, random_double());
                     // Raytracing with BVH
                     Ray r_in = sampled_ray;
-                    pixel_color = pixel_color + radiance(point_lights, objects, bvh_root, r_in, ray_tracing_depth, background_color, rl_init);
+                    pixel_color = pixel_color + radiance(point_lights, objects, bvh_root, r_in, ray_tracing_depth, background_color, rl_init, mis_obj_idx, sample_len * sample_len, mis_samples);
+                    tot_sample_id += 1;
                 }
             }
             image[j * image_width + i] = get_color(pixel_color / double(sample_len * sample_len));
@@ -872,8 +944,8 @@ void render(
 
 void demo(bool has_point_light) {
     FILE *f;
-    if (has_point_light) {f = fopen("images/demo1_is.ppm", "w");} 
-    else {f = fopen("images/demo1_nois.ppm", "w");}
+    if (has_point_light) {f = fopen("images/demo1_mis.ppm", "w");} 
+    else {f = fopen("images/demo1_nomis.ppm", "w");}
 
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
@@ -978,7 +1050,7 @@ void demo_hdr(bool has_point_lights) {
 // This is to test BVH optimization
 void bouncing_spheres() {
     FILE *f;
-    f = fopen("images/bouncing_spheres1.ppm", "w");
+    f = fopen("images/bouncing_spheres1_nomis.ppm", "w");
 
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
@@ -1052,13 +1124,13 @@ void bouncing_spheres() {
 
 void cornell_box(bool has_point_light) {
     FILE *f;
-    if (has_point_light) {f = fopen("images/cornell_box1_is.ppm", "w");} 
-    else {f = fopen("images/cornell_box1_nois.ppm", "w");}
+    if (has_point_light) {f = fopen("images/cornell_box1_mis.ppm", "w");} 
+    else {f = fopen("images/cornell_box1_nomis.ppm", "w");}
 
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
     
-    auto red   = std::make_shared<SpecularMaterial>(Vec(.65, .05, .05));
+    auto red   = std::make_shared<DiffusiveMaterial>(Vec(.65, .05, .05));
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
     auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
     auto light = std::make_shared<AreaLight>(Vec(15, 15, 15));
@@ -1109,9 +1181,13 @@ void cornell_box(bool has_point_light) {
 
 
 // The custom scene emulating https://benedikt-bitterli.me/resources/ "Veach, Bidir Room by Benedikt Bitterli"
-void custom() {
+void custom(bool has_point_light) {
     FILE *f;
-    f = fopen("images/custom1.ppm", "w");
+    if (has_point_light) {
+        f = fopen("images/custom1_mis.ppm", "w");
+    } else {
+        f = fopen("images/custom1_nomis.ppm", "w");
+    }
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
 
@@ -1121,6 +1197,7 @@ void custom() {
     Vec gray(0.5, 0.5, 0.5);
     Vec white(0.87, 0.87, 0.87);
     Vec light(1, 0.87, 0.6);
+    auto empty_material = std::shared_ptr<Material>();
 
     // The room: box, diffusive, white
     Vec room_orig(0, 0, 0);
@@ -1175,11 +1252,14 @@ void custom() {
     double toplight_radius = carpet_z * 0.5;
     Vec toplight_orig = room_orig + Vec(carpet_orig_off_delta + carpet_x * 1.1, room_y + toplight_radius * 0.9, room_z * 0.5);
     world.push_back(std::make_shared<Sphere>(toplight_orig, toplight_radius, std::make_shared<AreaLight>(light)));
+    if (has_point_light) {
+        lights.push_back(std::make_shared<Sphere>(toplight_orig, toplight_radius, empty_material));
+    }
     
 
     int image_width = 400;
     int image_height = 400 / 2;
-    int sample_len = 100;
+    int sample_len = 10;
     Vec background = Vec(0.70, 0.80, 1.00);
 
     double vfov     = 40;
@@ -1207,7 +1287,7 @@ void custom() {
 int main() {
     // bouncing_spheres();
     // demo(true);
-    demo_hdr(false);
-    // custom();
-    // cornell_box(false);
+    // demo_hdr(false);
+    // custom(true);
+    cornell_box(true);
 }
