@@ -17,6 +17,7 @@ const double rl_init = 0.95; // the initial roussian roulette weight
 const double cost_trav = 0.125; // the cost of traversal of SAH
 const double cost_isect = 1.0; // the cost of ray intersecting an object in SAH
 const int n_bucket = 12; // the number of buckets in SAH
+const double mis_beta = 2.0; // the power of balance heuristics in MIS
 
 inline double degrees_to_radians(double degrees) {
     return degrees * M_PI / 180.0;
@@ -400,24 +401,24 @@ struct Sphere : Object {
     Ray o;      // center. Support motion.
     std::shared_ptr<Material> mat;      // reflection type (DIFFuse, SPECular, REFRactive)
     BBox bbox;
+    double is_hdr; // whether this is the HDR World sphere
 
     // Static sphere
-    Sphere(const Vec& static_center, double radius, std::shared_ptr<Material> material) : o(Ray(static_center, Vec())), rad(std::fmax(radius, 0)), mat(material) {
+    Sphere(const Vec& static_center, double radius, std::shared_ptr<Material> material) : o(Ray(static_center, Vec())), rad(std::fmax(radius, 0)), mat(material), is_hdr(false) {
         Vec radius_v = Vec(rad, rad, rad);
         bbox = BBox(static_center - radius_v, static_center + radius_v);
-        /////////////////////////
-        // std::clog<<"Create a sphere at ";
-        // static_center.print();
-        // std::clog<<"\n\tbbox: ";
-        // bbox.print();
-        // std::clog<<"\n";
-        ////////////////////////////
     }
 
     // Moving sphere
-    Sphere(const Vec& from, const Vec& to, double radius, std::shared_ptr<Material> material) : o(Ray(from, to - from)), rad(std::fmax(radius, 0)), mat(material) {
+    Sphere(const Vec& from, const Vec& to, double radius, std::shared_ptr<Material> material) : o(Ray(from, to - from)), rad(std::fmax(radius, 0)), mat(material), is_hdr(false) {
         Vec radius_v = Vec(rad, rad, rad);
         bbox = BBox(BBox(from - radius_v, from + radius_v), BBox(to - radius_v, to + radius_v));
+    }
+
+    // HDR Static sphere
+    Sphere(const Vec& static_center, double radius, std::shared_ptr<Material> material, bool hdr_) : o(Ray(static_center, Vec())), rad(std::fmax(radius, 0)), mat(material), is_hdr(hdr_) {
+        Vec radius_v = Vec(rad, rad, rad);
+        bbox = BBox(static_center - radius_v, static_center + radius_v);
     }
 
     // Return whether intersection exists
@@ -445,7 +446,8 @@ struct Sphere : Object {
         hit_rec.v = theta / M_PI;
         hit_rec.dist = root;
         hit_rec.ip = ip;
-        hit_rec.set_norm(r, out_norm_u);
+        if (!is_hdr) {hit_rec.set_norm(r, out_norm_u);}
+        else {hit_rec.set_norm(r, out_norm_u * (-1));}
         hit_rec.mat = mat;
         return true;
     }
@@ -459,6 +461,10 @@ struct Sphere : Object {
         if (!this->intersect(Ray(src, direction), hit_rec, 1e-3, INF)) {
             return 0;
         }
+        if (is_hdr) {
+            return 1 / (4 * M_PI);
+        }
+        // not HDR sphere
         Vec src2sphere = o.at(0) - src;
         double cos_theta = std::sqrt(1 - rad * rad / (src2sphere.dot(src2sphere)));
         return 1 / (2 * M_PI * (1 - cos_theta));
@@ -468,6 +474,14 @@ struct Sphere : Object {
     // Return: a sampled `direction`
     // Only for static sphere
     Vec sample(const Vec& src) const override {
+        if (is_hdr) {
+            // For HDR, the point `src` is gauaranteed to be inside this sphere. 
+            // So, we uniformly sample a point on the sphere.
+            // A more sophisticated HDR light uses mipmap for sampling. Currently I haven't implemented this yet.
+            Vec rand_sphere_point = o.at(0) + rand_unit_vec() * rad;
+            return rand_sphere_point - src;
+        }
+        // not HDR sphere
         Vec src2sphere = o.at(0) - src;
         double dist_sq = src2sphere.dot(src2sphere);
         double z = 1 + random_double() * (std::sqrt(1 - rad * rad / dist_sq) - 1);
@@ -499,15 +513,6 @@ struct Quad : Object {
         n_u = unit_vec(uv_cross);
         dot_o_n_u = n_u.dot(o);
         bbox = BBox(BBox(o, o+u+v), BBox(o+u, o+v));
-        /////////////////////////
-        // std::clog<<"Create a quad at ";
-        // o.print();
-        // u.print();
-        // v.print();
-        // std::clog<<"\n\tbbox: ";
-        // bbox.print();
-        // std::clog<<"\n";
-        ////////////////////////////
     }
 
     // Return whether intersection exists
@@ -763,19 +768,11 @@ Vec radiance(
     HitRecord hit_rec;
     int obj_idx = intersect(objects, bvh_root, r_in, hit_rec, 1e-3, INF);
     if (obj_idx == -1) {return background;}
-    // std::clog<<"intersect with "<<obj_idx<<std::endl;///////////////////////////////////////
     // Roussian roulette
     if (random_double() > rl_weight) {return Vec();}
     // Sample the scattered ray
     Ray r_out;
     double sampled_prob = sample(r_in, hit_rec, point_lights, r_out);
-    /////////////////////////////////////////
-    // if (sampled_prob == 0) {
-    //     std::clog<<"emit "; 
-    //     hit_rec.mat->emit(hit_rec).print(); 
-    //     std::clog<<std::endl;
-    // }
-    //////////////////////////////////////////
     if (sampled_prob == 0) {return hit_rec.mat->emit(hit_rec);}
     // Calculate pScatter, attenuation, emit
     double scattered_prob = hit_rec.mat->pScatter(r_in, r_out, hit_rec);
@@ -923,23 +920,32 @@ void demo(bool has_point_light) {
     );
 }
 
-void demo_hdr() {
+void demo_hdr(bool has_point_lights) {
     FILE *f;
-    f = fopen("images/demo_hdr1.ppm", "w");
+    if (has_point_lights) {
+        f = fopen("images/demo_hdr1_is.ppm", "w");
+    } else {
+        f = fopen("images/demo_hdr1_nois.ppm", "w");
+    }
+    
 
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
 
-    auto red   = std::make_shared<SpecularMaterial>(Vec(0.85, 0.85, 0.85), 0.0);
+    auto red   = std::make_shared<TransmissiveMaterial>(1.5);
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
     auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
     // auto light = std::make_shared<AreaLight>("texture/forest.jpg");
-    auto light = std::make_shared<HDRLight>("texture/skysphere.jpg");
+    auto light = std::make_shared<AreaLight>("texture/roadsphere.hdr");
     auto empty_material = std::shared_ptr<Material>();
     
     world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 10, red));
-    // world.push_back(std::make_shared<Sphere>(Vec(0, -1e4, 0), 1e4, green));
-    world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 1e4, light));
+    world.push_back(std::make_shared<Sphere>(Vec(0, -1e4, 0), 1e4, green));
+    world.push_back(std::make_shared<Sphere>(Vec(60, 10, 20), 1e4, light, true));
+    if (has_point_lights) {
+        lights.push_back(std::make_shared<Sphere>(Vec(60, 10, 20), 1e4, empty_material, true));
+    }
+
 
     int image_width = 400;
     int image_height = 400;
@@ -947,7 +953,7 @@ void demo_hdr() {
     Vec background = Vec();
 
     double vfov     = 40;
-    Vec lookfrom = Vec(0, 10, 60);
+    Vec lookfrom = Vec(60, 10, 20);
     Vec lookat   = Vec(0, 10, 0);
     Vec vup      = Vec(0, 1, 0);
     double focus = 10;
@@ -1201,7 +1207,7 @@ void custom() {
 int main() {
     // bouncing_spheres();
     // demo(true);
-    demo_hdr();
+    demo_hdr(false);
     // custom();
     // cornell_box(false);
 }
