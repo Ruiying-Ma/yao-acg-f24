@@ -1,4 +1,5 @@
 #include "include/rtw_stb_image.h"
+#include "include/load_mesh.hpp"
 
 #include <math.h>   // smallpt, a Path Tracer by Kevin Beason, 2009
 #include <stdlib.h> // Make : g++ -O3 -fopenmp smallpt.cpp -o smallpt
@@ -96,6 +97,9 @@ inline Vec refract(const Vec& in, const Vec& n, double r) {
     return out_perp - out_para;
 }
 
+inline Vec tungsten2vec(const Tungsten::Vec3f& tv) {
+    return Vec(tv.x(), tv.y(), tv.z());
+}
 
 struct Ray { 
     Vec o, d; // origin, direction
@@ -558,6 +562,95 @@ struct Quad : Object {
 
 };
 
+
+struct Triangle : Object {
+    std::shared_ptr<Tungsten::Vertex> o;
+    std::shared_ptr<Tungsten::Vertex> v_u;
+    std::shared_ptr<Tungsten::Vertex> v_v;
+    Vec uv_cross;
+    double dot_o_n_u, uv_cross_len_sq;
+    Vec n_u;
+    std::shared_ptr<Material> mat;
+    BBox bbox;
+
+    Triangle(const std::vector<Tungsten::Vertex>& vtab, const Tungsten::TriangleI& tri, std::shared_ptr<Material> mat_): mat(mat_) {
+        o = std::make_shared<Tungsten::Vertex>(vtab[tri.v0]);
+        Vec o_norm = tungsten2vec(o->normal());
+        Vec o_pos = tungsten2vec(o->pos());
+        Vec v1 = tungsten2vec(vtab[tri.v1].pos()) - o_pos;
+        Vec v2 = tungsten2vec(vtab[tri.v2].pos()) - o_pos;
+        uv_cross = v1 % v2;
+        if (uv_cross.dot(o_norm) < 0) {
+            uv_cross = uv_cross * (-1);
+            v_v = std::make_shared<Tungsten::Vertex>(vtab[tri.v1]);
+            v_u = std::make_shared<Tungsten::Vertex>(vtab[tri.v2]);
+        } else {
+            v_u = std::make_shared<Tungsten::Vertex>(vtab[tri.v1]);
+            v_v = std::make_shared<Tungsten::Vertex>(vtab[tri.v2]);
+        }
+        uv_cross_len_sq = uv_cross.dot(uv_cross);
+        n_u = unit_vec(uv_cross);
+        dot_o_n_u = n_u.dot(o_pos);
+        bbox = BBox(BBox(o_pos, o_pos + v1 + v2), BBox(o_pos + v1, o_pos + v2));
+        
+    }
+
+    bool intersect(const Ray &r, HitRecord& hit_rec, double min, double max) const override {
+        Vec o_pos = tungsten2vec(o->pos());
+        Vec u_dir = tungsten2vec(v_u->pos()) - o_pos;
+        Vec v_dir = tungsten2vec(v_v->pos()) - o_pos;
+
+        double dot_r_n_u = r.d.dot(n_u);
+        if(std::fabs(dot_r_n_u) < 1e-8) {return false;} // parallel
+        double dist = (dot_o_n_u - n_u.dot(r.o)) / dot_r_n_u;
+        if(dist <= min || dist >= max) {return false;}
+        Vec ip = r.at(dist);
+        Vec ip_offset = ip - o_pos;
+        double alpha = (uv_cross.dot(ip_offset % v_dir)) / uv_cross_len_sq;
+        double beta = (uv_cross.dot(u_dir % ip_offset)) / uv_cross_len_sq;
+        if(alpha>1 || alpha<0 || beta>1 || beta<0 || (alpha + beta)>1) {return false;}
+        hit_rec.u = alpha;
+        hit_rec.v = beta;
+        hit_rec.dist = dist;
+        hit_rec.ip = ip;
+        hit_rec.set_norm(r, n_u);
+        hit_rec.mat = mat;
+        return true;
+    };
+
+    double prob(const Vec& src, const Vec& direction) const override {
+        HitRecord hit_rec;
+        if (!this->intersect(Ray(src, direction), hit_rec, 1e-3, INF)) {
+            return 0;
+        }
+        double area = std::sqrt(uv_cross_len_sq) / 2.0;
+        double direction_len = std::sqrt(direction.dot(direction));
+        return (hit_rec.dist * hit_rec.dist * direction_len * direction_len * direction_len) / (area * std::fabs(direction.dot(hit_rec.n)));
+    }; 
+
+    Vec sample(const Vec& src) const override {
+        Vec o_pos = tungsten2vec(o->pos());
+        Vec u_dir = tungsten2vec(v_u->pos()) - o_pos;
+        Vec v_dir = tungsten2vec(v_v->pos()) - o_pos;
+
+        return o_pos + (u_dir * random_double() + v_dir * random_double()) * 0.5 - src;
+    };
+
+    BBox get_bbox() const override {return bbox;}
+};
+
+void create_mesh(std::vector<std::shared_ptr<Object>>& objects, const std::string& relative_mesh_wo3, std::vector<Tungsten::Vertex>& vtab, std::vector<Tungsten::TriangleI>& ftab, const std::shared_ptr<Material> material) {
+    bool succeed_loading_mesh = TungstenloadWo3(relative_mesh_wo3, vtab, ftab);
+    if (!succeed_loading_mesh) {
+        std::clog <<"Fail to load the mesh from "<<relative_mesh_wo3<<"\n";
+        return;
+    }
+    for(auto& tri : ftab) {
+        objects.push_back(std::make_shared<Triangle>(vtab, tri, material));
+    }
+
+}
+
 void create_box(std::vector<std::shared_ptr<Object>>& objects, const Vec& a, double x, double y, double z, const std::shared_ptr<Material> material) {
     Vec b = a + Vec(std::fabs(x), std::fabs(y), std::fabs(z));
     ////////////////
@@ -1008,7 +1101,7 @@ void demo_hdr(bool has_point_lights) {
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
     auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
     // auto light = std::make_shared<AreaLight>("texture/forest.jpg");
-    auto light = std::make_shared<AreaLight>("texture/roadsphere.hdr");
+    auto light = std::make_shared<AreaLight>("texture/rosendal_park_sunset_puresky_8k.hdr");
     auto empty_material = std::shared_ptr<Material>();
     
     world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 10, red));
@@ -1284,10 +1377,115 @@ void custom(bool has_point_light) {
     );
 }
 
+
+void car(bool has_point_light) {
+    FILE *f;
+    if (has_point_light) {
+        f = fopen("images/car1_mis.ppm", "w");
+    } else {
+        f = fopen("images/car1_nomis.ppm", "w");
+    }
+    std::vector<std::shared_ptr<Object>> world;
+    std::vector<std::shared_ptr<Object>> lights;
+
+    auto car_paint = std::make_shared<SpecularMaterial>(Vec(.12, .45, .15), 0.1);
+    auto window_glass = std::make_shared<TransmissiveMaterial>(1.5);
+    auto black_rubber = std::make_shared<DiffusiveMaterial>(Vec(0, 0, 0));
+    auto black = std::make_shared<DiffusiveMaterial>(Vec(0, 0, 0));
+    auto white_rubber = std::make_shared<DiffusiveMaterial>(Vec(1, 1, 1));
+    auto steel = std::make_shared<SpecularMaterial>(Vec(.8, .8, .8));
+    auto ground = std::make_shared<DiffusiveMaterial>(Vec(.375, .375, .375));
+    auto leather = std::make_shared<DiffusiveMaterial>(Vec(0.61, 0.36, 0.11));
+    auto inner_body = std::make_shared<DiffusiveMaterial>(Vec(.25, .25, .25));
+    auto dash = std::make_shared<DiffusiveMaterial>(Vec(.75, .75, .75));
+    auto cabin = std::make_shared<DiffusiveMaterial>(Vec(0.15, 0.15, 0.15));
+    auto chrome = std::make_shared<SpecularMaterial>(Vec(.5, .5, .5));
+    auto hdr_light = std::make_shared<AreaLight>("texture/rosendal_park_sunset_puresky_8k.hdr");
+    auto empty_material = std::shared_ptr<Material>();
+
+    std::string relative_mesh_dir = "mesh/car/";
+
+    std::vector<std::vector<Tungsten::Vertex>> vtabs(63);
+    std::vector<std::vector<Tungsten::TriangleI>> ftabs(63);
+
+    std::vector<std::shared_ptr<Material>> mats = {
+        // 0-9
+        steel, steel, steel, window_glass, window_glass, steel, steel, steel, steel, steel,
+        // 10-19
+        steel, steel, car_paint, white_rubber, black_rubber, steel, window_glass, window_glass, steel, inner_body, 
+        // 20-29
+        black, chrome, chrome, leather, chrome, white_rubber, steel, leather, chrome, black,
+        // 30-39
+        steel, chrome, black_rubber, steel, ground, chrome, steel, steel, steel, inner_body,
+        // 40-49
+        chrome, chrome, chrome, steel, car_paint, steel, car_paint, car_paint, inner_body, steel,
+        // 50-59
+        chrome, chrome, chrome, steel, steel, steel, steel, chrome, steel, dash,
+        // 60-62
+        car_paint, cabin, car_paint
+    };
+
+    for(int i = 0; i < 63; i++) {
+        std::string mesh_id = std::to_string(i);
+        int mesh_id_str_len = mesh_id.length();
+        switch (mesh_id_str_len)
+        {
+        case 1:
+            mesh_id = "00" + mesh_id;
+            break;
+        case 2:
+            mesh_id = "0" + mesh_id;
+            break;
+        case 3:
+            break;
+        default:
+            std::cerr<<"Invalid mesh id "<<mesh_id<<"\n";
+            exit(1);
+        }
+        std::string relative_mesh_path = relative_mesh_dir + "Mesh" + mesh_id + ".wo3";
+        create_mesh(world, relative_mesh_path, vtabs[i], ftabs[i], mats[i]);
+    }
+
+    
+
+    int image_width = 1280; //1280
+    int image_height = 720; //720
+    int sample_len = 50;
+    Vec background = Vec(0.70, 0.80, 1.00);
+
+    double vfov     = 35.0;
+    Vec lookfrom = Vec(-8.83707046508789, 5.837699890136719, 14.620699882507324);
+    Vec lookat   = Vec(-1.8855600357055664, 1.7409499883651733, 2.2357900142669678);
+    Vec vup      = Vec(0, 1, 0);
+    double focus = 10;
+
+    double hdr_rad = 1e4;
+    world.push_back(std::make_shared<Sphere>(lookfrom, hdr_rad, hdr_light, true));
+    if (has_point_light) {
+        lights.push_back(std::make_shared<Sphere>(lookfrom, hdr_rad, empty_material, true));
+    }
+
+    render(
+        f,
+        lights, 
+        world,
+        image_height,
+        image_width,
+        sample_len,
+        lookfrom, // camera position
+        lookat, // camera target
+        vup, // up direction for camera
+        vfov, // camera vfov
+        focus, // focus of the camera
+        background
+    );
+}
+
 int main() {
     // bouncing_spheres();
     // demo(true);
     // demo_hdr(false);
     // custom(true);
-    cornell_box(true);
+    // cornell_box(true);
+    car(true);
 }
