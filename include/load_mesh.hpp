@@ -1,3 +1,7 @@
+#ifndef LOAD_MESH_HPP_
+#define LOAD_MESH_HPP_
+
+
 #include <vector>
 #include <memory>
 #include <sys/stat.h>
@@ -56,3 +60,5 @@ bool TungstenloadWo3(const std::string &relative_path, std::vector<Tungsten::Ver
     }
     return false;
 }
+
+#endif

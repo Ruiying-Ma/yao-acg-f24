@@ -1,4 +1,4 @@
-images
+images-temp/
 main*
 smallpt
 include-hide/
@@ -8,3 +8,12 @@ FileUtils*
 Path*
 rapidjson-1.1.0/
 rapidjson.tar.gz
+images/
+!images/car-poll.ppm
+!textbook/main.cc
+bouncing_spheres
+car
+cornell_box
+rocky_ground
+transmissive_sphere
+!texture/rocky_ground

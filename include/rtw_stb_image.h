@@ -87,6 +87,10 @@ class rtw_image {
         return bdata + y*bytes_per_scanline + x*bytes_per_pixel;
     }
 
+    bool is_empty() const {
+        return (bdata == nullptr);
+    }
+
   private:
     const int      bytes_per_pixel = 3;
     float         *fdata = nullptr;         // Linear floating point pixel data
