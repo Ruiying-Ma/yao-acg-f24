@@ -19,6 +19,7 @@ const double cost_trav = 0.125; // the cost of traversal of SAH
 const double cost_isect = 1.0; // the cost of ray intersecting an object in SAH
 const int n_bucket = 12; // the number of buckets in SAH
 const double mis_beta = 2.0; // the power of balance heuristics in MIS
+const double height_coef = 1.0; // convert rgb greyscale to actual height (a proportional height mapping)
 
 inline double degrees_to_radians(double degrees) {
     return degrees * M_PI / 180.0;
@@ -115,19 +116,18 @@ struct Ray {
     }
 };
 
+struct Texture;
 struct Material;
 struct HitRecord {
     Vec ip, n; // intersection_point, normal (reverse direction as r_in; always normalized)
+    Vec t_u, b_u; // TBN matrix. The tangent space. Note that they are normalized. They are used to convert normal map in the tangent space to the world space.
     double u, v; // coordinate at the texture space
     bool front_face; // determine whether the object emits light
     double dist; // ip = ray.orig + n * dist
     std::shared_ptr<Material> mat;
 
     // Set `n` such that `dot(n, r_in) >= 0`
-    void set_norm(const Ray& r_in, const Vec& out_norm_u) {
-        front_face = r_in.d.dot(out_norm_u) < 0;
-        n = (front_face) ? out_norm_u : out_norm_u * (-1);
-    }
+    void set_norm(const Ray& r_in, const Vec& out_norm_u);
 
     void print() {
         std::clog<<"HitRecord:\n\tintersection: ";
@@ -138,6 +138,8 @@ struct HitRecord {
 struct Texture {
     virtual ~Texture() = default;
     virtual Vec at(double u, double v, const Vec& p) const = 0;
+    virtual Vec norm(double u, double v) const = 0;
+    virtual double height(double u, double v) const = 0;
 };
 
 struct ColorTexture : Texture {
@@ -145,21 +147,40 @@ struct ColorTexture : Texture {
     ColorTexture(const Vec& c_): color(c_) {}
 
     // Return the color at (u, v)
-    Vec at(double u, double v, const Vec& p) const override {
-        return color;
-    }
+    Vec at(double u, double v, const Vec& p) const override { return color; }
+    Vec norm(double u, double v) const override { return Vec(); }
+    double height(double u, double v) const override { return 0.0; }
 };
 
 // Copied from the textbook
 struct ImageTexture : Texture {
     rtw_image img;
+    rtw_image normal_map;
+    rtw_image height_map;
     ImageTexture(const char* img_path): img(img_path) {}
+    ImageTexture(const char* img_path, const char* normal_path): img(img_path), normal_map(normal_path) {}
+    ImageTexture(const char* img_path, const char* normal_path, const char* height_path): img(img_path), normal_map(normal_path), height_map(height_path) {}
     Vec at(double u, double v, const Vec& p) const override {
         if(img.height() <=0) {return Vec(0, 1, 1);}
         u = clamp(u, 0.0, 1.0);
         v = 1 - clamp(v, 0.0, 1.0);
         auto pixel = img.pixel_data(int(u * img.width()), int(v * img.height()));
         return Vec(pixel[0] / 255.0, pixel[1] / 255.0, pixel[2] / 255.0);
+    }
+    // Return the non-unit normal at (u, v) in the tangent space
+    Vec norm(double u, double v) const override {
+        if (normal_map.is_empty()) {return Vec();}
+        // Convert RGB to coordinates in the tangent space: a unit vector
+        auto pixel = normal_map.pixel_data(int(u * normal_map.width()), int(v * normal_map.height()));
+        return Vec((pixel[0] * 2.0 / 255.0) - 1.0, (pixel[1] * 2.0 / 255.0) - 1.0, (pixel[2] * 2.0 / 255.0) - 1.0);
+    }
+    // Return the height at (u, v) in the tangent space
+    double height(double u, double v) const override {
+        if (height_map.is_empty()) {return 0.0;}
+        // Convert RGB to coordinates in the tangent space: a unit vector. White means higher.
+        auto pixel = height_map.pixel_data(int(u * height_map.width()), int(v * height_map.height()));
+        double avg_h = (pixel[0] + pixel[1] + pixel[2]) / (3.0 * 255.0);
+        return height_coef * std::fmin(1.0, std::fmax(0.0, avg_h));
     }
 };
 
@@ -174,12 +195,33 @@ struct Material {
     virtual Vec sample(const Ray& r_in, const HitRecord& hit_rec) const = 0;
     virtual double prob(const HitRecord& hit_rec, const Vec& direction) const = 0;
     virtual double sample_thresh() const = 0;
+    virtual std::shared_ptr<Texture> get_tex() const = 0;
 };
+
+void HitRecord::set_norm(const Ray& r_in, const Vec& out_norm_u) {
+    // Normal mapping & Height mapping
+    front_face = r_in.d.dot(out_norm_u) < 0;
+    n = (front_face) ? out_norm_u : out_norm_u * (-1);
+    if (mat == nullptr) {return;}
+    std::shared_ptr<Texture> tex = mat->get_tex();
+    if (tex == nullptr) {return;}
+    // Normal mapping
+    Vec tangent_norm = tex->norm(u, v);
+    if (std::fabs(tangent_norm.len()) > 1e-3) {
+        Vec world_norm_u = unit_vec(t_u * tangent_norm.x + b_u * tangent_norm.y + out_norm_u * tangent_norm.z);
+        n = (front_face) ? world_norm_u : world_norm_u * (-1);
+    }
+    // Height mapping
+    double height = tex->height(u, v);
+    ip = ip + n * height;
+}
 
 struct DiffusiveMaterial : Material {
     std::shared_ptr<Texture> tex;
     DiffusiveMaterial(const Vec& c_): tex(std::make_shared<ColorTexture>(c_)) {}
     DiffusiveMaterial(const char* img_path): tex(std::make_shared<ImageTexture>(img_path)) {}
+    DiffusiveMaterial(const char* img_path, const char* normal_path): tex(std::make_shared<ImageTexture>(img_path, normal_path)) {}
+    DiffusiveMaterial(const char* img_path, const char* normal_path, const char* height_path): tex(std::make_shared<ImageTexture>(img_path, normal_path, height_path)) {}
     double pScatter(const Ray& r_in, const Ray& r_out, const HitRecord& hit_rec) const override {
         double p_scatter = hit_rec.n.dot(unit_vec(r_out.d)) / M_PI;
         return p_scatter < 0 ? 0 : p_scatter;
@@ -207,6 +249,7 @@ struct DiffusiveMaterial : Material {
         return std::fmax(0, w.dot(unit_vec(direction))) / M_PI;
     }
     double sample_thresh() const override {return 0.5;}
+    std::shared_ptr<Texture> get_tex() const override {return tex;}
 };
 
 struct SpecularMaterial : Material {
@@ -214,6 +257,8 @@ struct SpecularMaterial : Material {
     double fuzz;
     SpecularMaterial(const Vec& c_): tex(std::make_shared<ColorTexture>(c_)), fuzz(0.5) {}
     SpecularMaterial(const char* img_path): tex(std::make_shared<ImageTexture>(img_path)) {}
+    SpecularMaterial(const char* img_path, const char* normal_path): tex(std::make_shared<ImageTexture>(img_path, normal_path)) {}
+    SpecularMaterial(const char* img_path, const char* normal_path, const char* height_path): tex(std::make_shared<ImageTexture>(img_path, normal_path, height_path)) {}
     SpecularMaterial(const Vec& c_, double f_): tex(std::make_shared<ColorTexture>(c_)), fuzz(std::fmax(f_, 0.01)) {}
     double pScatter(const Ray& r_in, const Ray& r_out, const HitRecord& hit_rec) const override {return 1.0;}
     Vec emit(const HitRecord& hit_rec) const override {return Vec();}
@@ -225,6 +270,7 @@ struct SpecularMaterial : Material {
     }
     double prob(const HitRecord& hit_rec, const Vec& direction) const override {return 1.0;}
     double sample_thresh() const override {return 0.0;}
+    std::shared_ptr<Texture> get_tex() const override {return tex;}
 };
 
 struct TransmissiveMaterial : Material {
@@ -248,7 +294,7 @@ struct TransmissiveMaterial : Material {
     }
     double prob(const HitRecord& hit_rec, const Vec& direction) const override {return 1.0;}
     double sample_thresh() const override {return 0.0;}
-
+    std::shared_ptr<Texture> get_tex() const override {return nullptr;}
     double schlick_approx(double cos_theta, double refr_factor) const {
         double r0 = (1 - refr_factor) / (1 + refr_factor);
         r0 *= r0;
@@ -269,25 +315,7 @@ struct AreaLight : Material {
     Vec sample(const Ray& r_in, const HitRecord& hit_rec) const override {return Vec();} 
     double prob(const HitRecord& hit_rec, const Vec& direction) const override {return 0.0;}
     double sample_thresh() const override {return 0.0;}
-};
-
-struct HDRLight : Material {
-    std::shared_ptr<Texture> tex;
-    HDRLight(const Vec& c_): tex(std::make_shared<ColorTexture>(c_)) {}
-    HDRLight(const char* img_path): tex(std::make_shared<ImageTexture>(img_path)) {}
-    double pScatter(const Ray& r_in, const Ray& r_out, const HitRecord& hit_rec) const override {assert(false); return 0.0;}
-    Vec emit(const HitRecord& hit_rec) const override {
-        if (hit_rec.front_face){
-            std::cerr<<"HDRLight cannot have front_face=True\n";
-            exit(1);
-            return Vec();
-        }
-        return tex->at(hit_rec.u, hit_rec.v, hit_rec.ip);
-    }
-    Vec attenuation(const HitRecord& hit_rec) const override {assert(false);return Vec(1.0, 1.0, 1.0);}  
-    Vec sample(const Ray& r_in, const HitRecord& hit_rec) const override {return Vec();} 
-    double prob(const HitRecord& hit_rec, const Vec& direction) const override {return 0.0;}
-    double sample_thresh() const override {return 0.0;}
+    std::shared_ptr<Texture> get_tex() const override {return tex;}
 };
 
 struct BBox {
@@ -446,13 +474,19 @@ struct Sphere : Object {
         Vec out_norm_u = (ip - cur_o) / rad;
         double theta = std::acos(-out_norm_u.y);
         double phi = std::atan2(-out_norm_u.z, out_norm_u.x) + M_PI;
+        double cos_theta = std::cos(theta);
+        double sin_theta = std::sin(theta);
+        double cos_phi = std::cos(phi);
+        double sin_phi = std::sin(phi);
         hit_rec.u = phi / (2 * M_PI);
         hit_rec.v = theta / M_PI;
+        hit_rec.t_u = Vec(sin_phi, 0, cos_phi);
+        hit_rec.b_u = Vec(-sin_theta * cos_phi, cos_theta, sin_theta * sin_phi);
         hit_rec.dist = root;
         hit_rec.ip = ip;
+        hit_rec.mat = mat;
         if (!is_hdr) {hit_rec.set_norm(r, out_norm_u);}
         else {hit_rec.set_norm(r, out_norm_u * (-1));}
-        hit_rec.mat = mat;
         return true;
     }
 
@@ -505,6 +539,7 @@ struct Sphere : Object {
 
 struct Quad : Object {
     Vec o, u, v;
+    Vec u_u, v_u;
     Vec uv_cross; // `n_u` is the unit-len normal following right-hand rule
     double dot_o_n_u, uv_cross_len_sq; // <n_u, o>
     Vec n_u; // face normal of unit len; follow right-hand rule
@@ -517,6 +552,8 @@ struct Quad : Object {
         n_u = unit_vec(uv_cross);
         dot_o_n_u = n_u.dot(o);
         bbox = BBox(BBox(o, o+u+v), BBox(o+u, o+v));
+        u_u = unit_vec(u);
+        v_u = unit_vec(v);
     }
 
     // Return whether intersection exists
@@ -533,10 +570,12 @@ struct Quad : Object {
         if(alpha>1 || alpha<0 || beta>1 || beta<0) {return false;}
         hit_rec.u = alpha;
         hit_rec.v = beta;
+        hit_rec.t_u = u_u;
+        hit_rec.b_u = v_u;
         hit_rec.dist = dist;
         hit_rec.ip = ip;
-        hit_rec.set_norm(r, n_u);
         hit_rec.mat = mat;
+        hit_rec.set_norm(r, n_u);
         return true;
     }
 
@@ -611,10 +650,12 @@ struct Triangle : Object {
         if(alpha>1 || alpha<0 || beta>1 || beta<0 || (alpha + beta)>1) {return false;}
         hit_rec.u = alpha;
         hit_rec.v = beta;
+        hit_rec.t_u = unit_vec(u_dir);
+        hit_rec.b_u = unit_vec(v_dir);
         hit_rec.dist = dist;
         hit_rec.ip = ip;
-        hit_rec.set_norm(r, n_u);
         hit_rec.mat = mat;
+        hit_rec.set_norm(r, n_u);
         return true;
     };
 
@@ -1043,15 +1084,15 @@ void demo(bool has_point_light) {
     std::vector<std::shared_ptr<Object>> world;
     std::vector<std::shared_ptr<Object>> lights;
 
-    // auto red   = std::make_shared<SpecularMaterial>(Vec(.65, .05, .05));
-    auto red   = std::make_shared<TransmissiveMaterial>(0.5);
+    auto red   = std::make_shared<SpecularMaterial>(Vec(.65, .05, .05));
+    // auto red   = std::make_shared<TransmissiveMaterial>(0.5);
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
-    auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
+    auto green = std::make_shared<DiffusiveMaterial>("texture/rocks/color.jpg", "texture/rocks/normal.jpg");
     auto light = std::make_shared<AreaLight>(Vec(15, 15, 15));
     auto empty_material = std::shared_ptr<Material>();
     
     world.push_back(std::make_shared<Sphere>(Vec(0, 10, 0), 10, red));
-    world.push_back(std::make_shared<Sphere>(Vec(0, -1e4, 0), 1e4, green));
+    world.push_back(std::make_shared<Quad>(Vec(60, 0, 20), Vec(-120, 0, 0), Vec(0, 0, -40), green));
     world.push_back(std::make_shared<Sphere>(Vec(4, 20, 14), 2, light));
     if (has_point_light) {
         lights.push_back(std::make_shared<Sphere>(Vec(4, 20, 14), 2, empty_material));
@@ -1059,7 +1100,7 @@ void demo(bool has_point_light) {
 
     int image_width = 400;
     int image_height = 400;
-    int sample_len = 40;
+    int sample_len = 10;
     Vec background = Vec();
 
     double vfov     = 40;
@@ -1217,7 +1258,7 @@ void bouncing_spheres() {
 
 void cornell_box(bool has_point_light) {
     FILE *f;
-    if (has_point_light) {f = fopen("images/cornell_box1_mis.ppm", "w");} 
+    if (has_point_light) {f = fopen("images/cornell_box1_mis_normal_height.ppm", "w");} 
     else {f = fopen("images/cornell_box1_nomis.ppm", "w");}
 
     std::vector<std::shared_ptr<Object>> world;
@@ -1226,6 +1267,9 @@ void cornell_box(bool has_point_light) {
     auto red   = std::make_shared<DiffusiveMaterial>(Vec(.65, .05, .05));
     auto white = std::make_shared<DiffusiveMaterial>(Vec(.73, .73, .73));
     auto green = std::make_shared<DiffusiveMaterial>(Vec(.12, .45, .15));
+    // auto rock_ground = std::make_shared<DiffusiveMaterial>("texture/rocks/color.jpg");
+    // auto rock_ground = std::make_shared<DiffusiveMaterial>("texture/rocks/color.jpg", "texture/rocks/normal.jpg");
+    auto rock_ground = std::make_shared<DiffusiveMaterial>("texture/rocks/color.jpg", "texture/rocks/normal.jpg", "texture/rocks/height.jpg");
     auto light = std::make_shared<AreaLight>(Vec(15, 15, 15));
     auto empty_material = std::shared_ptr<Material>();
 
@@ -1235,7 +1279,7 @@ void cornell_box(bool has_point_light) {
     if (has_point_light) {
         lights.push_back(std::make_shared<Quad>(Vec(343, 554, 332), Vec(-130,0,0), Vec(0,0,-105), empty_material));
     }
-    world.push_back(std::make_shared<Quad>(Vec(0,0,0), Vec(555,0,0), Vec(0,0,555), white));
+    world.push_back(std::make_shared<Quad>(Vec(0,0,0), Vec(555,0,0), Vec(0,0,555), rock_ground));
     world.push_back(std::make_shared<Quad>(Vec(555,555,555), Vec(-555,0,0), Vec(0,0,-555), white));
     world.push_back(std::make_shared<Quad>(Vec(0,0,555), Vec(555,0,0), Vec(0,555,0), white));
 
@@ -1486,6 +1530,6 @@ int main() {
     // demo(true);
     // demo_hdr(false);
     // custom(true);
-    // cornell_box(true);
-    car(true);
+    cornell_box(true);
+    // car(true);
 }
