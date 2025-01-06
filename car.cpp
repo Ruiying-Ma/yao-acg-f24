@@ -62,7 +62,7 @@ void car() {
             exit(1);
         }
         std::string relative_mesh_path = relative_mesh_dir + "Mesh" + mesh_id + ".wo3";
-        create_mesh(world, relative_mesh_path, vtabs[i], ftabs[i], mats[i]);
+        create_mesh(world, relative_mesh_path, vtabs[i], ftabs[i], mats[i], Vec());
     }
 
     

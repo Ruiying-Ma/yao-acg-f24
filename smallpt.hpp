@@ -601,6 +601,35 @@ struct Quad : Object {
 
 };
 
+struct Transform: Object {
+    Vec trans;
+    std::shared_ptr<Object> obj;
+    BBox bbox;
+    Transform(const Vec& trans_, std::shared_ptr<Object> obj_): trans(trans_), obj(obj_) {
+        bbox = obj->get_bbox();
+        bbox.x0 += trans.x;
+        bbox.y0 += trans.y;
+        bbox.z0 += trans.z;
+        bbox.x1 += trans.x;
+        bbox.y1 += trans.y;
+        bbox.z1 += trans.z;
+    }
+    bool intersect(const Ray &r, HitRecord& hit_rec, double min, double max) const override {
+        Ray offset_ray(r.o - trans, r.d, r.t);
+        if (!obj->intersect(offset_ray, hit_rec, min, max)) {return false;}
+        hit_rec.ip = hit_rec.ip + trans;
+        return true;
+    }
+    double prob(const Vec& src, const Vec& direction) const override {
+        Vec offset_src = src - trans;
+        return obj->prob(offset_src, direction);
+    }; 
+    Vec sample(const Vec& src) const override {
+        Vec offset_src = src - trans;
+        return obj->sample(offset_src);
+    };
+    BBox get_bbox() const override {return bbox;};
+};
 
 struct Triangle : Object {
     std::shared_ptr<Tungsten::Vertex> o;
@@ -611,6 +640,7 @@ struct Triangle : Object {
     Vec n_u;
     std::shared_ptr<Material> mat;
     BBox bbox;
+    bool is_valid;
 
     Triangle(const std::vector<Tungsten::Vertex>& vtab, const Tungsten::TriangleI& tri, std::shared_ptr<Material> mat_): mat(mat_) {
         o = std::make_shared<Tungsten::Vertex>(vtab[tri.v0]);
@@ -628,6 +658,8 @@ struct Triangle : Object {
             v_v = std::make_shared<Tungsten::Vertex>(vtab[tri.v2]);
         }
         uv_cross_len_sq = uv_cross.dot(uv_cross);
+        if (uv_cross_len_sq == 0) {is_valid = false; return;}
+        else {is_valid = true;}
         n_u = unit_vec(uv_cross);
         dot_o_n_u = n_u.dot(o_pos);
         bbox = BBox(BBox(o_pos, o_pos + v1 + v2), BBox(o_pos + v1, o_pos + v2));
@@ -680,14 +712,21 @@ struct Triangle : Object {
     BBox get_bbox() const override {return bbox;}
 };
 
-void create_mesh(std::vector<std::shared_ptr<Object>>& objects, const std::string& relative_mesh_wo3, std::vector<Tungsten::Vertex>& vtab, std::vector<Tungsten::TriangleI>& ftab, const std::shared_ptr<Material> material) {
+void create_mesh(std::vector<std::shared_ptr<Object>>& objects, const std::string& relative_mesh_wo3, std::vector<Tungsten::Vertex>& vtab, std::vector<Tungsten::TriangleI>& ftab, const std::shared_ptr<Material> material, const Vec& trans) {
     bool succeed_loading_mesh = TungstenloadWo3(relative_mesh_wo3, vtab, ftab);
     if (!succeed_loading_mesh) {
         std::clog <<"Fail to load the mesh from "<<relative_mesh_wo3<<"\n";
         return;
     }
+    double trans_len = trans.len();
     for(auto& tri : ftab) {
-        objects.push_back(std::make_shared<Triangle>(vtab, tri, material));
+        auto my_tri = std::make_shared<Triangle>(vtab, tri, material);
+        if (my_tri->is_valid == true && trans_len == 0.0) {
+            objects.push_back(my_tri);
+        } 
+        else if (my_tri->is_valid == true) {
+            objects.push_back(std::make_shared<Transform>(trans, my_tri));
+        }
     }
 
 }

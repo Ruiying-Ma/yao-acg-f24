@@ -16,4 +16,8 @@ car
 cornell_box
 rocky_ground
 transmissive_sphere
-!texture/rocky_ground
+*bathroom*
+bedroom
+scene/
+mesh/models
+!mesh/bedroom

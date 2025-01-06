@@ -22,8 +22,7 @@ void transmissive_sphere(bool multiple_importance_sampling) {
 
     int image_width = 400;
     int image_height = 400;
-    // int sample_len = 10;
-    int sample_len = 20;
+    int sample_len = 10;
     Vec background = Vec();
 
     double vfov     = 40;
@@ -50,7 +49,7 @@ void transmissive_sphere(bool multiple_importance_sampling) {
 }
 
 int main() {
-    transmissive_sphere(true);
+    transmissive_sphere(false);
 }
 
 // Reproduction: 
